@@ -1,61 +1,68 @@
-train_data:
-  train_audio_sample_rate: 48000
-  audio_samples_per_llm_token: 7680
+# dots.tts MeanFlow 蒸馏训练配置 / MeanFlow distillation training config.
+# 由 scripts/train_dots_tts_meanflow.py 读取：把多步 flow-matching teacher 蒸馏成少步(甚至 1~2 步)
+# 的 MeanFlow student,并可把 classifier-free guidance (CFG) 一并"烤进"学生,加速推理。
+# Consumed by scripts/train_dots_tts_meanflow.py: distills a multi-step flow-matching teacher into a
+# few-step MeanFlow student, optionally baking CFG into the student for faster inference.
+# 注意：只加注释,键值与结构未改 / Comments only — no keys or structure were changed.
+
+train_data:                          # 训练数据管线 (DataConfig) / training-side data pipeline
+  train_audio_sample_rate: 48000     # 训练音频采样率 Hz (48 kHz 高保真) / training audio sample rate (Hz)
+  audio_samples_per_llm_token: 7680  # 每个 LLM token 对应的音频采样点数;须与模型一致(脚本强校验) / audio samples per LLM token; must match model (hard-checked)
+  sources:                           # 数据源列表 / data sources
+    - name: ljspeech_meanflow_basic  # 数据源唯一名 / unique source name
+      weight: 1.0                    # 混采权重(>0) / sampling weight
+      pipeline: basic                # 逐样本流水线(蒸馏通常只用 basic,无需交织) / per-sample pipeline (distillation uses basic only)
+      adapter:
+        class_name: JsonlManifestSourceAdapter  # 仅支持此适配器类 / only supported adapter class
+        params:
+          manifest_path: downloaded_data/ljspeech_48khz_manifest_train.jsonl  # 训练 JSONL 清单 / training manifest
+          shuffle: true              # 训练打乱 / shuffle for training
+    # append other sources here if need  # 需要更多语料在此追加 / add more corpora here
+  num_tokens_per_epoch: 1000000      # 一个 epoch 的全局 token 预算(蒸馏数据量小于主训) / global token budget per epoch
+  num_workers: 4                     # DataLoader 取数子进程数 / DataLoader workers
+  pin_memory: true                   # 锁页内存加速 H2D 拷贝 / pin memory for faster H2D copy
+  max_audio_seconds_in_batch: 10.0   # 动态 batch 上限①音频秒数(比主训小:蒸馏要跑 teacher rollout,更吃显存) / cap by audio seconds (smaller — teacher rollout is memory-heavy)
+  max_text_tokens_in_batch: 1024     # 动态 batch 上限②文本 token 总数 / cap by total text tokens
+  max_samples_per_batch: 1           # 动态 batch 上限③样本条数=1:每 batch 仅 1 条样本 / cap by sample count = one sample per batch
+  bucketing_pool_size: 64            # 分桶缓冲池大小 / bucketing pool size
+val_data:                            # 验证数据管线 / validation-side data pipeline
+  train_audio_sample_rate: 48000     # 须与训练一致 / must match training
+  audio_samples_per_llm_token: 7680  # 须与训练/模型一致 / must match training & model
   sources:
-    - name: ljspeech_meanflow_basic
+    - name: ljspeech_meanflow_valid_basic  # 验证集源 / validation source
       weight: 1.0
       pipeline: basic
       adapter:
         class_name: JsonlManifestSourceAdapter
         params:
-          manifest_path: downloaded_data/ljspeech_48khz_manifest_train.jsonl
-          shuffle: true
+          manifest_path: downloaded_data/ljspeech_48khz_manifest_valid.jsonl  # 验证清单 / validation manifest
+          shuffle: false             # 验证不打乱以可复现 / no shuffle for reproducible eval
     # append other sources here if need
-  num_tokens_per_epoch: 1000000
-  num_workers: 4
+  num_workers: 2                     # 验证取数子进程数 / eval workers
   pin_memory: true
-  max_audio_seconds_in_batch: 10.0
-  max_text_tokens_in_batch: 1024
-  max_samples_per_batch: 1
-  bucketing_pool_size: 64
-val_data:
-  train_audio_sample_rate: 48000
-  audio_samples_per_llm_token: 7680
-  sources:
-    - name: ljspeech_meanflow_valid_basic
-      weight: 1.0
-      pipeline: basic
-      adapter:
-        class_name: JsonlManifestSourceAdapter
-        params:
-          manifest_path: downloaded_data/ljspeech_48khz_manifest_valid.jsonl
-          shuffle: false
-    # append other sources here if need
-  num_workers: 2
-  pin_memory: true
-  max_audio_seconds_in_batch: 10.0
+  max_audio_seconds_in_batch: 10.0   # 验证同样按这三道预算成 batch / same dynamic-batch budgets for eval
   max_text_tokens_in_batch: 1024
   max_samples_per_batch: 1
   bucketing_pool_size: 32
-train:
-  pretrained_model_path: pretrained_models/dots.tts-soar
-  output_dir: debug_train/meanflow_run_001
-  seed: 42
-  learning_rate: 1.0e-05
-  cfg_droprate: 0.0
-  xvec_drop_rate: 0.5
-  weight_decay: 0.01
-  warmup_steps: 50
-  max_train_steps: 500
-  gradient_accumulation_steps: 1
-  grad_clip_norm: 1
-  save_interval: 500
-  max_checkpoints_to_keep: 10
-  log_interval: 10
-  eval_interval: 100
-  max_eval_batches: 10
-  run_eval_on_start: false
-loss:
-  ce_weight: 1.0
-  fm_weight: 1.0
-  eos_weight: 1.0
+train:                               # 训练/蒸馏超参 (TrainConfig) / training hyper-parameters
+  pretrained_model_path: pretrained_models/dots.tts-soar  # student 起点权重(同时充当 teacher 基座) / student start weights (also the teacher base)
+  output_dir: debug_train/meanflow_run_001  # 输出根目录 / output root
+  seed: 42                           # 随机种子(打散/dropout/CFG 丢弃可复现) / RNG seed
+  learning_rate: 1.0e-05             # 峰值学习率 / peak LR
+  cfg_droprate: 0.0                  # 训练时整条丢弃 LLM hidden(文本/AR)条件以学无条件分支的概率;此处 0.0:CFG 由蒸馏(fused)烤进 student 而非靠运行期丢弃 / prob. of dropping the text/AR condition; 0.0 here because CFG is baked in via fused distillation
+  xvec_drop_rate: 0.5               # 训练时丢弃说话人 x-vector(音色)条件的概率=对音色单独做 CFG cond-drop / prob. of dropping speaker x-vector (timbre) condition for CFG
+  weight_decay: 0.01                 # AdamW 权重衰减 / weight decay
+  warmup_steps: 50                   # LR 线性 warmup 步数 / linear LR warmup steps
+  max_train_steps: 500               # 蒸馏总步数 / total distillation steps
+  gradient_accumulation_steps: 1     # 梯度累积步数(1=不累积) / grad-accum steps (1 = none)
+  grad_clip_norm: 1                  # 梯度范数裁剪阈值 / grad-norm clip threshold
+  save_interval: 500                 # 每多少 step 存档 / save every N steps
+  max_checkpoints_to_keep: 10        # 滚动保留 checkpoint 上限 / max ckpts kept
+  log_interval: 10                   # 每多少 step 打日志 / log every N steps
+  eval_interval: 100                 # 每多少 step 评估;null=关闭 / eval every N steps; null disables
+  max_eval_batches: 10               # 单次评估最多取 10 个 batch(蒸馏评估较慢,限量提速) / cap eval to 10 batches
+  run_eval_on_start: false           # step 0 是否先评估拿基线 / eval before training for a baseline
+loss:                                # 多任务 loss 加权 / multi-task loss weights
+  ce_weight: 1.0                     # AR 主干交叉熵权重 / cross-entropy (AR backbone) weight
+  fm_weight: 1.0                     # flow/MeanFlow 速度回归损失权重(蒸馏的主损失:让 student 拟合 teacher 的平均速度场) / flow/MeanFlow velocity-regression weight (main distillation loss)
+  eos_weight: 1.0                    # 停止符 EOS 预测损失权重 / end-of-sequence prediction weight

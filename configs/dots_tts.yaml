@@ -1,44 +1,49 @@
-train_data:
-  train_audio_sample_rate: 48000
-  audio_samples_per_llm_token: 7680
-  sources:
-    - name: ljspeech_basic
-      weight: 1.0
-      pipeline: basic
+# dots.tts 主训练配置 (SFT / 续训) / Main training config (fine-tune / continued pretraining).
+# 由 scripts/train_dots_tts.py 读取；对应强类型 schema 见 src/dots_tts/config/{data,train}.py。
+# Consumed by scripts/train_dots_tts.py; typed schema lives in src/dots_tts/config/{data,train}.py.
+# 注意：只加注释，键值与结构未改 / Comments only — no keys or structure were changed.
+
+train_data:                          # 训练数据管线 (DataConfig) / training-side data pipeline
+  train_audio_sample_rate: 48000     # 训练音频采样率 Hz；dots.tts 走 48 kHz 高保真 / training audio sample rate (Hz)
+  audio_samples_per_llm_token: 7680  # 每个 LLM token 对应的音频采样点数=换算音频时长↔token 长度的桥梁；须与模型设置一致(脚本会强校验) / audio samples per LLM token; must match model setting (hard-checked)
+  sources:                           # 混采的数据源列表，按 weight 加权抽样 / list of mixed sources, weighted sampling
+    - name: ljspeech_basic           # 数据源唯一名 (不可重名) / unique source name (must be unique)
+      weight: 1.0                    # 混采相对权重 (>0)，越大被抽到越频繁 / relative sampling weight, larger = drawn more often
+      pipeline: basic                # 处理模式：basic=逐样本(单条文本→单条音频) / per-sample pipeline (one text → one audio)
+      adapter:                       # 该源的读取适配器 / how this source is read
+        class_name: JsonlManifestSourceAdapter  # 适配器实现类(仅支持此项) / only supported adapter class
+        params:
+          manifest_path: downloaded_data/ljspeech_48khz_manifest_train.jsonl  # JSONL 清单路径(每行一条样本元数据) / per-sample manifest
+          shuffle: true              # 训练集打乱顺序 / shuffle samples for training
+    - name: ljspeech_interleave      # 同一语料的第二个源,但用交织流水线 / same corpus, interleave pipeline
+      weight: 1.0                    # 与 basic 等权混合 / equal weight with the basic source
+      pipeline: interleave           # 处理模式：interleave=多源/多段文本-音频交织(训长上下文/对话式拼接) / interleaved text-audio packing (long-context / dialog-style)
       adapter:
         class_name: JsonlManifestSourceAdapter
         params:
           manifest_path: downloaded_data/ljspeech_48khz_manifest_train.jsonl
           shuffle: true
-    - name: ljspeech_interleave
-      weight: 1.0
-      pipeline: interleave
-      adapter:
-        class_name: JsonlManifestSourceAdapter
-        params:
-          manifest_path: downloaded_data/ljspeech_48khz_manifest_train.jsonl
-          shuffle: true
-    # append other sources here if need
-  num_tokens_per_epoch: 2000000
-  num_workers: 20
-  pin_memory: true
-  max_audio_seconds_in_batch: 30.0
-  max_text_tokens_in_batch: 2048
-  max_samples_per_batch: null
-  bucketing_pool_size: 100
-val_data:
-  train_audio_sample_rate: 48000
-  audio_samples_per_llm_token: 7680
+    # append other sources here if need   # 需要更多语料就在此追加 source / add more corpora here
+  num_tokens_per_epoch: 2000000      # 一个 epoch 跨所有 rank 的全局 token 预算(决定 epoch 长度) / global token budget per epoch across ranks
+  num_workers: 20                    # DataLoader 取数子进程数(越大吞吐越高、占内存) / DataLoader worker processes
+  pin_memory: true                   # 锁页内存以加速 CPU→GPU 拷贝 / pin host memory for faster H2D copy
+  max_audio_seconds_in_batch: 30.0   # 动态 batch 上限①：单 batch 音频总秒数封顶 / dynamic-batch cap by total audio seconds
+  max_text_tokens_in_batch: 2048     # 动态 batch 上限②：单 batch 文本 token 总数封顶 / cap by total text tokens
+  max_samples_per_batch: null        # 动态 batch 上限③：单 batch 样本条数;null=不限(只受上面两道预算约束) / cap by sample count; null = unlimited
+  bucketing_pool_size: 100           # 分桶缓冲池：先攒这么多样本再按长度近邻成桶,降 padding 浪费(越大越优但更耗内存) / bucketing pool: larger = less padding waste, more memory
+val_data:                            # 验证数据管线 (同 DataConfig schema) / validation-side data pipeline
+  train_audio_sample_rate: 48000     # 须与训练一致 / must match training sample rate
+  audio_samples_per_llm_token: 7680  # 须与训练/模型一致 / must match training & model
   sources:
-    - name: ljspeech_valid_basic
+    - name: ljspeech_valid_basic     # 验证集 basic 源 / validation basic source
       weight: 1.0
       adapter:
         class_name: JsonlManifestSourceAdapter
         params:
-          manifest_path: downloaded_data/ljspeech_48khz_manifest_valid.jsonl
-          shuffle: false
+          manifest_path: downloaded_data/ljspeech_48khz_manifest_valid.jsonl  # 验证清单 / validation manifest
+          shuffle: false             # 验证不打乱以保证结果可复现 / no shuffle for reproducible eval
       pipeline: basic
-    - name: ljspeech_valid_interleave
+    - name: ljspeech_valid_interleave  # 验证集 interleave 源 / validation interleave source
       weight: 1.0
       pipeline: interleave
       adapter:
@@ -48,29 +53,29 @@ val_data:
           shuffle: false
       pipeline: interleave
     # append other sources here if need
-  num_workers: 4
+  num_workers: 4                     # 验证取数子进程数(可比训练小) / fewer workers for eval
   pin_memory: true
-  max_audio_seconds_in_batch: 30.0
+  max_audio_seconds_in_batch: 30.0   # 验证同样按这三道预算动态成 batch / same dynamic-batch budgets for eval
   max_text_tokens_in_batch: 2048
   max_samples_per_batch: null
   bucketing_pool_size: 64
-train:
-  pretrained_model_path: pretrained_models/pretrain_cpt_decay/latest/model/
-  output_dir: debug_train/run_003
-  seed: 42
-  learning_rate: 1.0e-05
-  weight_decay: 0.01
-  warmup_steps: 50
-  max_train_steps: 500
-  gradient_accumulation_steps: 2
-  grad_clip_norm: 1
-  save_interval: 500
-  max_checkpoints_to_keep: 40
-  log_interval: 10
-  eval_interval: 100
-  max_eval_batches: null
-  run_eval_on_start: false
-loss:
-  ce_weight: 1.0
-  fm_weight: 1.0
-  eos_weight: 1.0
+train:                               # 训练超参 (TrainConfig) / training hyper-parameters
+  pretrained_model_path: pretrained_models/pretrain_cpt_decay/latest/model/  # 训练起点权重(续训/微调的基座) / starting checkpoint to fine-tune from
+  output_dir: debug_train/run_003    # 输出根目录(存 checkpoint/日志/评估产物) / output root for ckpts, logs, eval
+  seed: 42                           # 随机种子,保证打散/dropout/CFG 丢弃可复现 / RNG seed for reproducibility
+  learning_rate: 1.0e-05             # 峰值学习率(配合 warmup 使用) / peak LR (used with warmup)
+  weight_decay: 0.01                 # AdamW 权重衰减(L2 正则) / AdamW weight decay
+  warmup_steps: 50                   # LR 线性 warmup 步数(0→peak),稳前期 / linear LR warmup steps
+  max_train_steps: 500               # 训练总步数(以 optimizer step 计),到此即停 / total optimizer steps before stopping
+  gradient_accumulation_steps: 2     # 梯度累积步数,有效 batch=micro-batch×此值(小显存模拟大 batch) / grad-accum: effective batch = micro × this
+  grad_clip_norm: 1                  # 梯度全局范数裁剪阈值,防梯度爆炸 / global grad-norm clip threshold
+  save_interval: 500                 # 每多少 step 存一次 checkpoint / save a checkpoint every N steps
+  max_checkpoints_to_keep: 40        # 滚动保留的 checkpoint 上限,超出删最旧 / max ckpts kept, oldest rolled off
+  log_interval: 10                   # 每多少 step 打一次训练日志(loss 等) / log training metrics every N steps
+  eval_interval: 100                 # 每多少 step 跑一次验证;null=关闭周期评估 / run eval every N steps; null disables
+  max_eval_batches: null             # 单次评估最多取多少 batch;null=跑完整验证集 / max batches per eval; null = full set
+  run_eval_on_start: false           # step 0 是否先评估一次拿基线 / eval once before training to get a baseline
+loss:                                # 多任务 loss 加权(ModelConfig) / multi-task loss weights
+  ce_weight: 1.0                     # AR 主干交叉熵权重(自回归文本/时序建模) / cross-entropy (autoregressive backbone) weight
+  fm_weight: 1.0                     # flow-matching 速度回归损失权重(连续潜在声学建模的核心项) / flow-matching velocity-regression weight
+  eos_weight: 1.0                    # 停止符 EOS 预测损失权重(控制生成何时结束) / end-of-sequence prediction weight
